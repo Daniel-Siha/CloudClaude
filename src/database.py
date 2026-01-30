@@ -250,6 +250,26 @@ async def get_supplier_summary_by_month(telegram_user_id: int, year: int, month:
         return [dict(row) for row in rows]
 
 
+async def update_receipt(receipt_id: int, telegram_user_id: int, **kwargs) -> bool:
+    """Update een bonnetje met de gegeven velden."""
+    if not kwargs:
+        return False
+
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        # Bouw de update query dynamisch
+        set_clauses = ", ".join(f"{key} = ?" for key in kwargs.keys())
+        values = list(kwargs.values()) + [receipt_id, telegram_user_id]
+
+        cursor = await db.execute(f"""
+            UPDATE receipts
+            SET {set_clauses}
+            WHERE id = ? AND telegram_user_id = ?
+        """, values)
+
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def delete_receipt(receipt_id: int, telegram_user_id: int) -> bool:
     """Verwijder een bonnetje (alleen als het van de gebruiker is)."""
     async with aiosqlite.connect(DATABASE_PATH) as db:

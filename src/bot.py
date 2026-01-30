@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -10,12 +11,16 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ConversationHandler,
     ContextTypes,
     filters,
 )
 
-from .database import init_db, save_receipt, save_receipt_items, get_monthly_summary
-from .ocr import analyze_receipt, format_receipt_summary
+from .database import (
+    init_db, save_receipt, save_receipt_items, get_monthly_summary,
+    update_receipt, delete_receipt
+)
+from .ocr import analyze_receipt, format_receipt_summary, EXPENSE_CATEGORIES
 from .excel_export import create_monthly_report
 
 # Laad environment variables
@@ -32,6 +37,9 @@ logger = logging.getLogger(__name__)
 IMAGES_PATH = Path(__file__).parent.parent / "images"
 IMAGES_PATH.mkdir(exist_ok=True)
 
+# Conversation states voor edits
+EDIT_STORE, EDIT_AMOUNT, EDIT_BTW, EDIT_PAYMENT = range(4)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start commando - welkomstbericht."""
@@ -41,12 +49,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Stuur mij een foto van je bonnetje en ik zal het automatisch verwerken.
 
 *Beschikbare commando's:*
-📸 Stuur een foto → Bonnetje wordt gescand en opgeslagen
+📸 Stuur een foto → Bonnetje wordt gescand
 /overzicht → Bekijk je maandoverzicht
 /export → Download Excel rapport
 /help → Hulp en instructies
 
-_Tip: Maak duidelijke foto's voor de beste resultaten!_
+_Na het scannen kun je de info direct bevestigen of aanpassen!_
 """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
@@ -56,31 +64,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 📖 *Hoe gebruik je deze bot?*
 
-*1. Bonnetje toevoegen:*
-Stuur simpelweg een foto van je bonnetje. De bot herkent automatisch:
-• Winkelnaam
-• Datum
-• Totaalbedrag
-• BTW
-• Betaalmethode (PIN/Cash)
-• Producten
+*1. Bonnetje scannen:*
+Stuur een foto → Bot scant automatisch → Bevestig of pas aan
 
-*2. Overzicht bekijken:*
-Gebruik /overzicht om een samenvatting te zien van je uitgaven deze maand.
+*2. Wat wordt herkend:*
+• Leverancier (Sligro, Makro, etc.)
+• Datum & factuurnummer
+• Totaal incl/excl BTW
+• BTW 9% en 21% apart
+• Betaalmethode
+• Alle producten
 
-*3. Excel exporteren:*
-Gebruik /export om een gedetailleerd Excel bestand te krijgen met:
-• Alle bonnetjes
-• Overzicht per categorie
-• Overzicht per betaalmethode
+*3. Na het scannen:*
+✅ Klopt? → Bevestigen
+✏️ Fout? → Aanpassen via knoppen
 
-*Tips voor goede scans:*
-• Zorg voor goede belichting
-• Houd de camera recht boven het bonnetje
-• Zorg dat alle tekst leesbaar is
-• Vermijd schaduwen
+*4. Overzichten:*
+/overzicht → Maandsamenvatting
+/export → Excel download
 
-_Problemen? Stuur een nieuwe, duidelijkere foto!_
+_Tip: Duidelijke foto's geven betere resultaten!_
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -105,7 +108,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        # Download de foto (grootste versie)
+        # Download de foto
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
 
@@ -118,50 +121,362 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Analyseer met OCR
         openai_key = os.getenv("OPENAI_API_KEY")
 
-        # Check of OpenAI key nodig is
         if ocr_mode == "openai" and not openai_key:
             await processing_msg.edit_text(
-                "❌ OpenAI API key niet geconfigureerd maar OCR_MODE=openai.\n"
-                "Zet OCR_MODE=test of OCR_MODE=tesseract in je .env bestand."
+                "❌ OpenAI API key niet geconfigureerd.\n"
+                "Zet OCR_MODE=test in je .env bestand."
             )
             return
 
         result = await analyze_receipt(str(image_path), openai_key, mode=ocr_mode)
 
-        # Sla op in database (horeca uitgebreid)
-        receipt_id = await save_receipt(
-            telegram_user_id=user_id,
-            store_name=result.get('store_name'),
-            supplier_type=result.get('supplier_type'),
-            date=result.get('date'),
-            invoice_number=result.get('invoice_number'),
-            total_amount=result.get('total_amount'),
-            total_excl_btw=result.get('total_excl_btw'),
-            btw_amount=result.get('btw_amount'),
-            btw_9_amount=result.get('btw_9_amount'),
-            btw_21_amount=result.get('btw_21_amount'),
-            payment_method=result.get('payment_method'),
-            category=result.get('category'),
-            raw_text=result.get('raw_text'),
-            image_path=str(image_path)
-        )
+        # Sla TIJDELIJK op in context (nog niet in database)
+        # Pas opslaan na bevestiging
+        context.user_data['pending_receipt'] = {
+            'result': result,
+            'image_path': str(image_path)
+        }
 
-        # Sla items op
-        if result.get('items'):
-            await save_receipt_items(receipt_id, result['items'])
-
-        # Formatteer en stuur resultaat
+        # Formatteer resultaat
         summary = format_receipt_summary(result)
-        summary += f"\n\n✅ _Opgeslagen als bonnetje #{receipt_id}_"
 
-        await processing_msg.edit_text(summary, parse_mode='Markdown')
+        # Voeg bevestig/aanpas knoppen toe
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Correct, opslaan", callback_data="receipt_confirm"),
+                InlineKeyboardButton("❌ Annuleren", callback_data="receipt_cancel"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Winkel", callback_data="receipt_edit_store"),
+                InlineKeyboardButton("✏️ Bedrag", callback_data="receipt_edit_amount"),
+            ],
+            [
+                InlineKeyboardButton("✏️ BTW", callback_data="receipt_edit_btw"),
+                InlineKeyboardButton("✏️ Betaling", callback_data="receipt_edit_payment"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        summary += "\n\n⬇️ *Klopt dit? Bevestig of pas aan:*"
+
+        await processing_msg.edit_text(summary, parse_mode='Markdown', reply_markup=reply_markup)
 
     except Exception as e:
         logger.error(f"Error processing photo: {e}")
         await processing_msg.edit_text(
-            f"❌ Er ging iets mis bij het verwerken van het bonnetje.\n"
-            f"_Probeer een duidelijkere foto te maken._"
+            f"❌ Er ging iets mis bij het verwerken.\n_Probeer een duidelijkere foto._"
         )
+
+
+async def receipt_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bevestig en sla het bonnetje op."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    pending = context.user_data.get('pending_receipt')
+
+    if not pending:
+        await query.edit_message_text("❌ Geen bonnetje om op te slaan. Stuur een nieuwe foto.")
+        return
+
+    result = pending['result']
+    image_path = pending['image_path']
+
+    # Nu opslaan in database
+    receipt_id = await save_receipt(
+        telegram_user_id=user_id,
+        store_name=result.get('store_name'),
+        supplier_type=result.get('supplier_type'),
+        date=result.get('date'),
+        invoice_number=result.get('invoice_number'),
+        total_amount=result.get('total_amount'),
+        total_excl_btw=result.get('total_excl_btw'),
+        btw_amount=result.get('btw_amount'),
+        btw_9_amount=result.get('btw_9_amount'),
+        btw_21_amount=result.get('btw_21_amount'),
+        payment_method=result.get('payment_method'),
+        category=result.get('category'),
+        raw_text=result.get('raw_text'),
+        image_path=image_path
+    )
+
+    # Sla items op
+    if result.get('items'):
+        await save_receipt_items(receipt_id, result['items'])
+
+    # Clear pending
+    context.user_data.pop('pending_receipt', None)
+
+    # Update bericht
+    summary = format_receipt_summary(result)
+    summary += f"\n\n✅ *Opgeslagen als bonnetje #{receipt_id}*"
+
+    await query.edit_message_text(summary, parse_mode='Markdown')
+
+
+async def receipt_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Annuleer het bonnetje."""
+    query = update.callback_query
+    await query.answer()
+
+    # Clear pending
+    context.user_data.pop('pending_receipt', None)
+
+    await query.edit_message_text("❌ Bonnetje geannuleerd. Stuur een nieuwe foto om opnieuw te beginnen.")
+
+
+async def receipt_edit_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start edit voor winkelnaam."""
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.get('pending_receipt')
+    if not pending:
+        await query.edit_message_text("❌ Geen bonnetje om aan te passen.")
+        return ConversationHandler.END
+
+    current = pending['result'].get('store_name', 'Onbekend')
+
+    await query.edit_message_text(
+        f"✏️ *Winkelnaam aanpassen*\n\n"
+        f"Huidige waarde: `{current}`\n\n"
+        f"Typ de nieuwe winkelnaam of /cancel om te annuleren:",
+        parse_mode='Markdown'
+    )
+
+    return EDIT_STORE
+
+
+async def save_edit_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sla de nieuwe winkelnaam op."""
+    new_value = update.message.text.strip()
+
+    pending = context.user_data.get('pending_receipt')
+    if pending:
+        pending['result']['store_name'] = new_value
+
+    await update.message.reply_text(f"✅ Winkelnaam aangepast naar: *{new_value}*", parse_mode='Markdown')
+
+    # Toon opnieuw de bevestig knoppen
+    await show_pending_receipt(update, context)
+
+    return ConversationHandler.END
+
+
+async def receipt_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start edit voor bedrag."""
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.get('pending_receipt')
+    if not pending:
+        await query.edit_message_text("❌ Geen bonnetje om aan te passen.")
+        return ConversationHandler.END
+
+    current = pending['result'].get('total_amount', 0)
+
+    await query.edit_message_text(
+        f"✏️ *Totaalbedrag aanpassen*\n\n"
+        f"Huidige waarde: `€{current:.2f}`\n\n"
+        f"Typ het nieuwe bedrag (bijv. `125.50`) of /cancel:",
+        parse_mode='Markdown'
+    )
+
+    return EDIT_AMOUNT
+
+
+async def save_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sla het nieuwe bedrag op."""
+    try:
+        new_value = float(update.message.text.strip().replace(',', '.').replace('€', ''))
+    except ValueError:
+        await update.message.reply_text("❌ Ongeldig bedrag. Probeer opnieuw (bijv. `125.50`):")
+        return EDIT_AMOUNT
+
+    pending = context.user_data.get('pending_receipt')
+    if pending:
+        pending['result']['total_amount'] = new_value
+
+    await update.message.reply_text(f"✅ Bedrag aangepast naar: *€{new_value:.2f}*", parse_mode='Markdown')
+
+    await show_pending_receipt(update, context)
+    return ConversationHandler.END
+
+
+async def receipt_edit_btw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start edit voor BTW."""
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.get('pending_receipt')
+    if not pending:
+        await query.edit_message_text("❌ Geen bonnetje om aan te passen.")
+        return ConversationHandler.END
+
+    btw_9 = pending['result'].get('btw_9_amount', 0) or 0
+    btw_21 = pending['result'].get('btw_21_amount', 0) or 0
+
+    await query.edit_message_text(
+        f"✏️ *BTW aanpassen*\n\n"
+        f"Huidige waarden:\n"
+        f"• 9% BTW: `€{btw_9:.2f}`\n"
+        f"• 21% BTW: `€{btw_21:.2f}`\n\n"
+        f"Typ beide waarden gescheiden door een spatie:\n"
+        f"Bijv. `5.50 12.30` (eerst 9%, dan 21%)\n\n"
+        f"Of /cancel om te annuleren:",
+        parse_mode='Markdown'
+    )
+
+    return EDIT_BTW
+
+
+async def save_edit_btw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sla de nieuwe BTW waarden op."""
+    try:
+        parts = update.message.text.strip().replace(',', '.').split()
+        btw_9 = float(parts[0])
+        btw_21 = float(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ Ongeldige invoer. Gebruik: `5.50 12.30` (9% BTW, 21% BTW):")
+        return EDIT_BTW
+
+    pending = context.user_data.get('pending_receipt')
+    if pending:
+        pending['result']['btw_9_amount'] = btw_9
+        pending['result']['btw_21_amount'] = btw_21
+        pending['result']['btw_amount'] = btw_9 + btw_21
+
+    await update.message.reply_text(
+        f"✅ BTW aangepast:\n• 9%: €{btw_9:.2f}\n• 21%: €{btw_21:.2f}",
+        parse_mode='Markdown'
+    )
+
+    await show_pending_receipt(update, context)
+    return ConversationHandler.END
+
+
+async def receipt_edit_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start edit voor betaalmethode."""
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.get('pending_receipt')
+    if not pending:
+        await query.edit_message_text("❌ Geen bonnetje om aan te passen.")
+        return
+
+    current = pending['result'].get('payment_method', 'onbekend')
+
+    # Toon knoppen voor betaalmethode
+    keyboard = [
+        [
+            InlineKeyboardButton("💳 PIN", callback_data="payment_pin"),
+            InlineKeyboardButton("💵 Cash", callback_data="payment_cash"),
+        ],
+        [
+            InlineKeyboardButton("📄 Factuur", callback_data="payment_factuur"),
+            InlineKeyboardButton("❓ Onbekend", callback_data="payment_onbekend"),
+        ],
+        [InlineKeyboardButton("⬅️ Terug", callback_data="payment_back")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        f"✏️ *Betaalmethode aanpassen*\n\n"
+        f"Huidige waarde: `{current}`\n\n"
+        f"Kies de juiste betaalmethode:",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+
+async def save_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sla de nieuwe betaalmethode op."""
+    query = update.callback_query
+    await query.answer()
+
+    method = query.data.replace("payment_", "")
+
+    if method == "back":
+        await show_pending_receipt_callback(update, context)
+        return
+
+    pending = context.user_data.get('pending_receipt')
+    if pending:
+        pending['result']['payment_method'] = method
+
+    await query.answer(f"✅ Betaalmethode: {method.upper()}")
+
+    await show_pending_receipt_callback(update, context)
+
+
+async def show_pending_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toon het pending bonnetje opnieuw met knoppen."""
+    pending = context.user_data.get('pending_receipt')
+    if not pending:
+        return
+
+    result = pending['result']
+    summary = format_receipt_summary(result)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Correct, opslaan", callback_data="receipt_confirm"),
+            InlineKeyboardButton("❌ Annuleren", callback_data="receipt_cancel"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Winkel", callback_data="receipt_edit_store"),
+            InlineKeyboardButton("✏️ Bedrag", callback_data="receipt_edit_amount"),
+        ],
+        [
+            InlineKeyboardButton("✏️ BTW", callback_data="receipt_edit_btw"),
+            InlineKeyboardButton("✏️ Betaling", callback_data="receipt_edit_payment"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    summary += "\n\n⬇️ *Klopt dit? Bevestig of pas aan:*"
+
+    await update.message.reply_text(summary, parse_mode='Markdown', reply_markup=reply_markup)
+
+
+async def show_pending_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toon het pending bonnetje opnieuw (voor callback queries)."""
+    query = update.callback_query
+    pending = context.user_data.get('pending_receipt')
+    if not pending:
+        return
+
+    result = pending['result']
+    summary = format_receipt_summary(result)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Correct, opslaan", callback_data="receipt_confirm"),
+            InlineKeyboardButton("❌ Annuleren", callback_data="receipt_cancel"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Winkel", callback_data="receipt_edit_store"),
+            InlineKeyboardButton("✏️ Bedrag", callback_data="receipt_edit_amount"),
+        ],
+        [
+            InlineKeyboardButton("✏️ BTW", callback_data="receipt_edit_btw"),
+            InlineKeyboardButton("✏️ Betaling", callback_data="receipt_edit_payment"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    summary += "\n\n⬇️ *Klopt dit? Bevestig of pas aan:*"
+
+    await query.edit_message_text(summary, parse_mode='Markdown', reply_markup=reply_markup)
+
+
+async def cancel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Annuleer de huidige edit."""
+    await update.message.reply_text("Aanpassing geannuleerd.")
+    await show_pending_receipt(update, context)
+    return ConversationHandler.END
 
 
 async def overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -169,7 +484,6 @@ async def overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     now = datetime.now()
 
-    # Check of er argumenten zijn (bijv. /overzicht 2024 1)
     args = context.args
     if len(args) >= 2:
         try:
@@ -190,7 +504,6 @@ async def overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Formatteer overzicht (horeca)
     text = f"""
 📊 *Overzicht {month:02d}/{year}*
 
@@ -214,7 +527,6 @@ async def overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _Gebruik /export voor gedetailleerd Excel rapport._
 """
 
-    # Voeg navigatie knoppen toe
     keyboard = [
         [
             InlineKeyboardButton("◀️ Vorige maand", callback_data=f"overview_{year}_{month-1}"),
@@ -227,7 +539,7 @@ _Gebruik /export voor gedetailleerd Excel rapport._
 
 
 async def overview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle overview navigation callbacks."""
+    """Handle overview navigation."""
     query = update.callback_query
     await query.answer()
 
@@ -235,7 +547,6 @@ async def overview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, year, month = query.data.split('_')
     year, month = int(year), int(month)
 
-    # Handle month overflow
     if month < 1:
         month = 12
         year -= 1
@@ -279,7 +590,6 @@ async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     now = datetime.now()
 
-    # Check argumenten
     args = context.args
     if len(args) >= 2:
         try:
@@ -319,11 +629,9 @@ async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start de bot."""
-    # Haal token op
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         print("❌ TELEGRAM_BOT_TOKEN niet gevonden in .env bestand!")
-        print("Maak een .env bestand aan met je Telegram bot token.")
         return
 
     # Initialiseer database
@@ -333,12 +641,50 @@ def main():
     # Maak application
     application = Application.builder().token(token).build()
 
+    # Conversation handlers voor edits
+    edit_store_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(receipt_edit_store, pattern="^receipt_edit_store$")],
+        states={
+            EDIT_STORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_store)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_edit)],
+    )
+
+    edit_amount_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(receipt_edit_amount, pattern="^receipt_edit_amount$")],
+        states={
+            EDIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_edit)],
+    )
+
+    edit_btw_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(receipt_edit_btw, pattern="^receipt_edit_btw$")],
+        states={
+            EDIT_BTW: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_edit_btw)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_edit)],
+    )
+
     # Voeg handlers toe
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("overzicht", overview))
     application.add_handler(CommandHandler("export", export))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # Receipt callbacks
+    application.add_handler(CallbackQueryHandler(receipt_confirm, pattern="^receipt_confirm$"))
+    application.add_handler(CallbackQueryHandler(receipt_cancel, pattern="^receipt_cancel$"))
+    application.add_handler(CallbackQueryHandler(receipt_edit_payment, pattern="^receipt_edit_payment$"))
+    application.add_handler(CallbackQueryHandler(save_payment_method, pattern="^payment_"))
+
+    # Edit handlers
+    application.add_handler(edit_store_handler)
+    application.add_handler(edit_amount_handler)
+    application.add_handler(edit_btw_handler)
+
+    # Overview callback
     application.add_handler(CallbackQueryHandler(overview_callback, pattern=r"^overview_"))
 
     # Start de bot
