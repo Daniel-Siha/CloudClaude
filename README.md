@@ -1,12 +1,12 @@
-# Bonnetjes Bot 🧾
+# Bonnetjes Bot
 
-Een Telegram bot die bonnetjes scant met AI (OpenAI Vision) en automatisch overzichten maakt in Excel.
+Een Telegram bot die bonnetjes scant en automatisch overzichten maakt in Excel.
 
 ## Features
 
-- 📸 **Foto's van bonnetjes** sturen via Telegram
-- 🤖 **AI-powered OCR** met OpenAI Vision (GPT-4o)
-- 📊 **Automatische extractie** van:
+- Foto's van bonnetjes sturen via Telegram
+- Meerdere OCR opties (gratis en betaald)
+- Automatische extractie van:
   - Winkelnaam
   - Datum
   - Totaalbedrag
@@ -14,65 +14,79 @@ Een Telegram bot die bonnetjes scant met AI (OpenAI Vision) en automatisch overz
   - Betaalmethode (PIN/Cash/Onbekend)
   - Categorie (supermarkt, restaurant, etc.)
   - Individuele producten
-- 📈 **Maandoverzichten** direct in Telegram
-- 📁 **Excel exports** met:
-  - Alle bonnetjes
-  - Overzicht per categorie
-  - Overzicht per betaalmethode
+- Maandoverzichten direct in Telegram
+- Excel exports met alle details
 
-## Installatie
+## OCR Modi
 
-### 1. Clone de repository
+| Modus | Kosten | Kwaliteit | Beschrijving |
+|-------|--------|-----------|--------------|
+| `test` | Gratis | N/A | Fake data voor development/testen |
+| `tesseract` | Gratis | Matig | Lokale OCR, vereist Tesseract installatie |
+| `openai` | ~€0.01-0.03/bon | Excellent | OpenAI Vision API (GPT-4o) |
+| `auto` | Varieert | Varieert | OpenAI als key aanwezig, anders Tesseract |
+
+**Aanbeveling**: Start met `OCR_MODE=test` om de bot te testen zonder kosten!
+
+## Quick Start
 
 ```bash
+# 1. Clone & setup
 git clone <repository-url>
 cd CloudClaude
-```
-
-### 2. Maak een virtual environment
-
-```bash
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# of
-venv\Scripts\activate  # Windows
-```
+source venv/bin/activate
 
-### 3. Installeer dependencies
-
-```bash
+# 2. Installeer dependencies
 pip install -r requirements.txt
-```
 
-### 4. Configureer de bot
-
-Kopieer `.env.example` naar `.env` en vul de waarden in:
-
-```bash
+# 3. Configureer
 cp .env.example .env
-```
+# Edit .env met je Telegram token
 
-Je hebt nodig:
-
-#### Telegram Bot Token
-1. Open Telegram en zoek naar `@BotFather`
-2. Stuur `/newbot` en volg de instructies
-3. Kopieer de token naar `.env`
-
-#### OpenAI API Key
-1. Ga naar [platform.openai.com](https://platform.openai.com)
-2. Maak een API key aan
-3. Kopieer de key naar `.env`
-
-### 5. Start de bot
-
-```bash
+# 4. Start (test modus)
 python main.py
 ```
 
-## Gebruik
+## Configuratie
 
-### Commando's
+### Telegram Bot Token (verplicht)
+1. Open Telegram en zoek `@BotFather`
+2. Stuur `/newbot` en volg de instructies
+3. Kopieer de token naar `.env`
+
+### OCR Modus kiezen
+
+In je `.env` bestand:
+
+```bash
+# Voor testen (fake data, gratis)
+OCR_MODE=test
+
+# Voor gratis OCR (vereist Tesseract)
+OCR_MODE=tesseract
+
+# Voor beste kwaliteit (kost geld)
+OCR_MODE=openai
+OPENAI_API_KEY=sk-...
+```
+
+### Tesseract installeren (optioneel)
+
+Alleen nodig als je `OCR_MODE=tesseract` gebruikt:
+
+```bash
+# Ubuntu/Debian
+sudo apt install tesseract-ocr tesseract-ocr-nld
+
+# macOS
+brew install tesseract tesseract-lang
+
+# Windows
+# Download van: https://github.com/UB-Mannheim/tesseract/wiki
+```
+
+## Commando's
 
 | Commando | Beschrijving |
 |----------|--------------|
@@ -83,21 +97,6 @@ python main.py
 | `/export` | Excel export van huidige maand |
 | `/export 2024 1` | Export van januari 2024 |
 
-### Bonnetje toevoegen
-
-Stuur simpelweg een foto van je bonnetje naar de bot. De bot zal automatisch:
-1. Het bonnetje scannen met AI
-2. Alle gegevens extraheren
-3. Opslaan in de database
-4. Een samenvatting terugsturen
-
-### Tips voor goede scans
-
-- Zorg voor goede belichting
-- Houd de camera recht boven het bonnetje
-- Zorg dat alle tekst leesbaar is
-- Vermijd schaduwen en kreukels
-
 ## Project Structuur
 
 ```
@@ -105,31 +104,14 @@ CloudClaude/
 ├── main.py              # Entry point
 ├── requirements.txt     # Python dependencies
 ├── .env.example         # Voorbeeld configuratie
-├── .gitignore
-├── README.md
 ├── src/
-│   ├── __init__.py
 │   ├── bot.py           # Telegram bot handlers
 │   ├── database.py      # SQLite database
-│   ├── ocr.py           # OpenAI Vision OCR
+│   ├── ocr.py           # OCR modules (test/tesseract/openai)
 │   └── excel_export.py  # Excel rapport generator
 ├── exports/             # Gegenereerde Excel bestanden
 └── images/              # Opgeslagen bonnetje foto's
 ```
-
-## Database
-
-De bot gebruikt SQLite voor lokale opslag. De database wordt automatisch aangemaakt bij de eerste start.
-
-### Tabellen
-
-- `receipts` - Bonnetje metadata
-- `receipt_items` - Individuele producten per bonnetje
-
-## Kosten
-
-- **Telegram**: Gratis
-- **OpenAI API**: ~$0.01-0.03 per bonnetje (afhankelijk van grootte)
 
 ## Licentie
 

@@ -89,9 +89,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Verwerk een foto van een bonnetje."""
     user_id = update.effective_user.id
 
+    # Haal OCR modus op
+    ocr_mode = os.getenv("OCR_MODE", "test").lower()
+
     # Stuur bezig bericht
+    mode_text = {
+        "test": "🧪 TEST MODUS",
+        "tesseract": "🔍 Tesseract OCR",
+        "openai": "🤖 OpenAI Vision",
+        "auto": "🔍 Auto"
+    }
     processing_msg = await update.message.reply_text(
-        "🔍 _Bonnetje wordt gescand..._",
+        f"_{mode_text.get(ocr_mode, 'Bonnetje')} wordt verwerkt..._",
         parse_mode='Markdown'
     )
 
@@ -108,13 +117,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Analyseer met OCR
         openai_key = os.getenv("OPENAI_API_KEY")
-        if not openai_key:
+
+        # Check of OpenAI key nodig is
+        if ocr_mode == "openai" and not openai_key:
             await processing_msg.edit_text(
-                "❌ OpenAI API key niet geconfigureerd. Neem contact op met de beheerder."
+                "❌ OpenAI API key niet geconfigureerd maar OCR_MODE=openai.\n"
+                "Zet OCR_MODE=test of OCR_MODE=tesseract in je .env bestand."
             )
             return
 
-        result = await analyze_receipt(str(image_path), openai_key)
+        result = await analyze_receipt(str(image_path), openai_key, mode=ocr_mode)
 
         # Sla op in database
         receipt_id = await save_receipt(
@@ -317,7 +329,15 @@ def main():
     application.add_handler(CallbackQueryHandler(overview_callback, pattern=r"^overview_"))
 
     # Start de bot
+    ocr_mode = os.getenv("OCR_MODE", "test").lower()
+    mode_names = {
+        "test": "TEST MODUS (fake data)",
+        "tesseract": "Tesseract OCR (gratis)",
+        "openai": "OpenAI Vision (betaald)",
+        "auto": "Auto (OpenAI als key aanwezig, anders Tesseract)"
+    }
     print("🤖 Bonnetjes Bot is gestart!")
+    print(f"📋 OCR Modus: {mode_names.get(ocr_mode, ocr_mode)}")
     print("Druk op Ctrl+C om te stoppen.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
