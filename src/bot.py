@@ -128,13 +128,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         result = await analyze_receipt(str(image_path), openai_key, mode=ocr_mode)
 
-        # Sla op in database
+        # Sla op in database (horeca uitgebreid)
         receipt_id = await save_receipt(
             telegram_user_id=user_id,
             store_name=result.get('store_name'),
+            supplier_type=result.get('supplier_type'),
             date=result.get('date'),
+            invoice_number=result.get('invoice_number'),
             total_amount=result.get('total_amount'),
+            total_excl_btw=result.get('total_excl_btw'),
             btw_amount=result.get('btw_amount'),
+            btw_9_amount=result.get('btw_9_amount'),
+            btw_21_amount=result.get('btw_21_amount'),
             payment_method=result.get('payment_method'),
             category=result.get('category'),
             raw_text=result.get('raw_text'),
@@ -185,21 +190,28 @@ async def overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Formatteer overzicht
+    # Formatteer overzicht (horeca)
     text = f"""
 📊 *Overzicht {month:02d}/{year}*
 
 📋 Aantal bonnetjes: *{summary.get('total_receipts', 0)}*
 
 💰 *Totalen:*
-├ Totaal uitgegeven: €{summary.get('total_spent', 0) or 0:.2f}
-├ Totaal BTW: €{summary.get('total_btw', 0) or 0:.2f}
-│
-├ 💳 PIN: €{summary.get('total_pin', 0) or 0:.2f}
-├ 💵 Cash: €{summary.get('total_cash', 0) or 0:.2f}
-└ ❓ Onbekend: €{summary.get('total_unknown', 0) or 0:.2f}
+├ Incl BTW: €{summary.get('total_spent', 0) or 0:.2f}
+├ Excl BTW: €{summary.get('total_excl_btw', 0) or 0:.2f}
 
-_Gebruik /export voor een gedetailleerd Excel bestand._
+📊 *BTW Uitsplitsing:*
+├ 9% (laag): €{summary.get('total_btw_9', 0) or 0:.2f}
+├ 21% (hoog): €{summary.get('total_btw_21', 0) or 0:.2f}
+└ Totaal BTW: €{summary.get('total_btw', 0) or 0:.2f}
+
+💳 *Per Betaalmethode:*
+├ PIN: €{summary.get('total_pin', 0) or 0:.2f}
+├ Cash: €{summary.get('total_cash', 0) or 0:.2f}
+├ Factuur: €{summary.get('total_factuur', 0) or 0:.2f}
+└ Onbekend: €{summary.get('total_unknown', 0) or 0:.2f}
+
+_Gebruik /export voor gedetailleerd Excel rapport._
 """
 
     # Voeg navigatie knoppen toe
@@ -242,12 +254,13 @@ async def overview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📋 Aantal bonnetjes: *{summary.get('total_receipts', 0)}*
 
 💰 *Totalen:*
-├ Totaal uitgegeven: €{summary.get('total_spent', 0) or 0:.2f}
-├ Totaal BTW: €{summary.get('total_btw', 0) or 0:.2f}
-│
-├ 💳 PIN: €{summary.get('total_pin', 0) or 0:.2f}
-├ 💵 Cash: €{summary.get('total_cash', 0) or 0:.2f}
-└ ❓ Onbekend: €{summary.get('total_unknown', 0) or 0:.2f}
+├ Incl BTW: €{summary.get('total_spent', 0) or 0:.2f}
+├ Excl BTW: €{summary.get('total_excl_btw', 0) or 0:.2f}
+
+📊 *BTW:*
+├ 9%: €{summary.get('total_btw_9', 0) or 0:.2f}
+├ 21%: €{summary.get('total_btw_21', 0) or 0:.2f}
+└ Totaal: €{summary.get('total_btw', 0) or 0:.2f}
 """
 
     keyboard = [
